@@ -1,3 +1,4 @@
 .env
 .venv/
 __pycahce__/
+chroma_db/
