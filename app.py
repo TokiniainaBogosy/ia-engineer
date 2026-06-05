@@ -1,7 +1,8 @@
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 from groq import Groq
-import chromadb 
+import faiss
+import numpy as np
 from pypdf import PdfReader
 from dotenv import load_dotenv
 import os
@@ -43,24 +44,19 @@ def decouper_en_chunks(texte: str, taille: int = 300, overlap: int = 50) -> list
         debut += taille - overlap
     return chunks
 
-def indexer_pdf(chunks: list, nom_collection: str):
-    chroma_client = chromadb.Client()
-    collection = chroma_client.get_or_create_collection(nom_collection)
-    embeddings = model.encode(chunks).tolist()
-    collection.add(
-        documents=chunks,
-        embeddings=embeddings,
-        ids=[f"chunk_{i}" for i in range(len(chunks))]
-    )
-    return collection
+def indexer_pdf(chunks: list):
+    embeddings = model.encode(chunks)
+    embeddings_np = np.array(embeddings).astype('float32')
+    index = faiss.IndexFlatL2(embeddings_np.shape[1])
+    index.add(embeddings_np)
+    return index, chunks
 
-def rag(question: str, collection) -> str:
-    question_embedding = model.encode([question]).tolist()
-    resultats = collection.query(
-        query_embeddings=question_embedding,
-        n_results=3
-    )
-    chunks_pertinents = resultats["documents"][0]
+def rag(question: str, index, chunks: list) -> str:
+    question_embedding = model.encode([question])
+    question_np = np.array(question_embedding).astype('float32')
+    
+    distances, indices = index.search(question_np, k=3)
+    chunks_pertinents = [chunks[i] for i in indices[0]]
     contexte = "\n".join([f"- {chunk}" for chunk in chunks_pertinents])
 
     reponse = groq_client.chat.completions.create(
@@ -91,11 +87,11 @@ if pdf_uploade is not None:
         with st.spinner("Lecture et indexation du PDF..."):
             texte = lire_pdf(pdf_uploade)
             chunks = decouper_en_chunks(texte)
-            collection = indexer_pdf(chunks, "pdf_assistant")
-            st.session_state.collection = collection
+            index, chunks_stockes = indexer_pdf(chunks)
+            st.session_state.index = index
+            st.session_state.chunks = chunks_stockes
             st.session_state.pdf_nom = pdf_uploade.name
             st.session_state.messages = []
-        st.success(f"✅ PDF indexé — {len(chunks)} chunks créés")
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -113,7 +109,7 @@ if pdf_uploade is not None:
 
         with st.chat_message("assistant"):
             with st.spinner("Recherche en cours..."):
-                reponse = rag(question, st.session_state.collection)
+                reponse = rag(question, st.session_state.index, st.session_state.chunks)
             st.write(reponse)
 
         st.session_state.messages.append({"role": "assistant", "content": reponse})
